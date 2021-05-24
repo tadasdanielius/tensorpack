@@ -10,25 +10,14 @@ from tensorpack.utils.timer import timed_operation
 
 from config import config as cfg
 from dataset import DatasetRegistry, DatasetSplit
+from pycocotools.coco import COCO
 
 __all__ = ['register_coco']
 
 
 class COCODetection(DatasetSplit):
-    # handle a few special splits whose names do not match the directory names
-    _INSTANCE_TO_BASEDIR = {
-        'valminusminival2014': 'val2014',
-        'minival2014': 'val2014',
-        'val2017_100': 'val2017',
-    }
 
-    """
-    Mapping from the incontinuous COCO category id to an id in [1, #category]
-    For your own coco-format, dataset, change this to an **empty dict**.
-    """
-    COCO_id_to_category_id = {13: 12, 14: 13, 15: 14, 16: 15, 17: 16, 18: 17, 19: 18, 20: 19, 21: 20, 22: 21, 23: 22, 24: 23, 25: 24, 27: 25, 28: 26, 31: 27, 32: 28, 33: 29, 34: 30, 35: 31, 36: 32, 37: 33, 38: 34, 39: 35, 40: 36, 41: 37, 42: 38, 43: 39, 44: 40, 46: 41, 47: 42, 48: 43, 49: 44, 50: 45, 51: 46, 52: 47, 53: 48, 54: 49, 55: 50, 56: 51, 57: 52, 58: 53, 59: 54, 60: 55, 61: 56, 62: 57, 63: 58, 64: 59, 65: 60, 67: 61, 70: 62, 72: 63, 73: 64, 74: 65, 75: 66, 76: 67, 77: 68, 78: 69, 79: 70, 80: 71, 81: 72, 82: 73, 84: 74, 85: 75, 86: 76, 87: 77, 88: 78, 89: 79, 90: 80}  # noqa
-
-    def __init__(self, basedir, split):
+    def __init__(self, basedir, split, folder_name=None):
         """
         Args:
             basedir (str): root of the dataset which contains the subdirectories for each split and annotations
@@ -47,18 +36,27 @@ class COCODetection(DatasetSplit):
 
             use `COCODetection(DIR, 'XX')` and `COCODetection(DIR, 'YY')`
         """
+        if folder_name is None:
+            folder_name = 'coco_' + split
+
         basedir = os.path.expanduser(basedir)
-        self._imgdir = os.path.realpath(os.path.join(
-            basedir, self._INSTANCE_TO_BASEDIR.get(split, split)))
+        self._imgdir = os.path.realpath(
+            os.path.join(
+                basedir, folder_name
+            )
+        )
         assert os.path.isdir(self._imgdir), "{} is not a directory!".format(self._imgdir)
         annotation_file = os.path.join(
             basedir, 'annotations/instances_{}.json'.format(split))
         assert os.path.isfile(annotation_file), annotation_file
 
-        from pycocotools.coco import COCO
         self.coco = COCO(annotation_file)
         self.annotation_file = annotation_file
-        logger.info("Instances loaded from {}.".format(annotation_file))
+        logger.info(
+            "Instances loaded from {0}. folder_name: {1} / split: {2} / imgdir: {3}".format(
+                annotation_file, folder_name, split, self._imgdir
+            )
+        )
 
     # https://github.com/cocodataset/cocoapi/blob/master/PythonAPI/pycocoEvalDemo.ipynb
     def print_coco_metrics(self, results):
@@ -159,7 +157,8 @@ class COCODetection(DatasetSplit):
             # Require non-zero seg area and more than 1x1 box size
             if obj['area'] > 1 and w > 0 and h > 0:
                 all_boxes.append([x1, y1, x2, y2])
-                all_cls.append(self.COCO_id_to_category_id.get(obj['category_id'], obj['category_id']))
+                #all_cls.append(self.COCO_id_to_category_id.get(obj['category_id'], obj['category_id']))
+                all_cls.append(obj['category_id'])
                 iscrowd = obj.get("iscrowd", 0)
                 all_iscrowd.append(iscrowd)
 
@@ -184,7 +183,7 @@ class COCODetection(DatasetSplit):
         cls = np.asarray(all_cls, dtype='int32')  # (n,)
         if len(cls):
             assert cls.min() > 0, "Category id in COCO format must > 0!"
-        img['class'] = cls          # n, always >0
+        img['class'] = cls  # n, always >0
         img['is_crowd'] = np.asarray(all_iscrowd, dtype='int8')  # n,
         if add_mask:
             # also required to be float32
@@ -218,29 +217,35 @@ class COCODetection(DatasetSplit):
             return {}
 
 
+def _get_class_names(basedir, name):
+    annotation_file = '{0}/annotations/instances_{1}.json'.format(basedir, name)
+    coco = COCO(annotation_file)
+    categories = [''] * (len(coco.cats)+1)
+    categories[0] = 'BG'
+    for k, category in coco.cats.items():
+        categories[category['id']] = category['name']
+    return categories
+
+
 def register_coco(basedir):
-    """
-    Add COCO datasets like "coco_train201x" to the registry,
-    so you can refer to them with names in `cfg.DATA.TRAIN/VAL`.
+    basedir_expanded = os.path.expanduser(basedir)
 
-    Note that train2017==trainval35k==train2014+val2014-minival2014, and val2017==minival2014.
-    """
-
-    # 80 names for COCO
-    # For your own coco-format dataset, change this.
-    class_names = [
-        "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"]  # noqa
-    class_names = ["BG"] + class_names
-
-    for split in ["train2017", "val2017", "train2014", "val2014",
-                  "valminusminival2014", "minival2014", "val2017_100"]:
-        name = "coco_" + split
-        DatasetRegistry.register(name, lambda x=split: COCODetection(basedir, x))
-        DatasetRegistry.register_metadata(name, 'class_names', class_names)
+    for folder_name in os.listdir(basedir_expanded):
+        if not os.path.isdir(os.path.join(basedir_expanded, folder_name)):
+            continue
+        if not folder_name.startswith('coco_'):
+            continue
+        split = folder_name.replace('coco_', '')
+        class_names = _get_class_names(basedir_expanded, split)
+        logger.info('registering dataset {0}'.format(folder_name))
+        DatasetRegistry.register(folder_name, lambda x=split: COCODetection(basedir_expanded, x))
+        DatasetRegistry.register_metadata(folder_name, 'class_names', class_names)
+        logger.info('dataset {0} registered.'.format(folder_name))
 
 
 if __name__ == '__main__':
-    basedir = '~/data/coco'
-    c = COCODetection(basedir, 'train2014')
+    basedir = '~/temp/data/'
+    register_coco(basedir)
+    c = COCODetection(basedir, 'objects', 'coco_objects')
     roidb = c.load(add_gt=True, add_mask=True)
     print("#Images:", len(roidb))
